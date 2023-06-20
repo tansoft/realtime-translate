@@ -1,6 +1,7 @@
 import asyncio
 import argparse
-import string
+import os
+import math
 
 # This example uses the sounddevice library to get an audio stream from the
 # microphone. It's not a dependency of the project but can be installed with
@@ -21,9 +22,7 @@ process the returned transcription results as needed. This
 handler will simply print the text out to your interpreter.
 """
 
-
 class MyEventHandler(TranscriptResultStreamHandler):
-    queue = ''
     #lastPartial = False
     async def handle_transcript_event(self, transcript_event: TranscriptEvent):
         # This handler can be implemented to handle transcriptions as needed.
@@ -31,14 +30,20 @@ class MyEventHandler(TranscriptResultStreamHandler):
         results = transcript_event.transcript.results
         for result in results:
             for alt in result.alternatives:
-                #print(alt.transcript, end='\r' if result.is_partial else '\n')
+                columns, rows = os.get_terminal_size(0)
+                txt = alt.transcript.strip()
+                #os.system('echo "'+txt+'" >> a.txt')
+                up = math.floor((len(txt) - 1) / columns)
+                # \033[2K 擦除当前光标所在的行 \033[A 光标上移 \033[F 移动光标到上一行，列不变
+                printtext = '\033[F\r' * up
+                #print(txt, end='\r' if result.is_partial else '\n')
                 if result.is_partial:
-                    print(alt.transcript, end='\r')
+                    print(txt + printtext, end='\r')
                 else:
-                    print(alt.transcript, end='\n')
-                    self.queue.put_nowait(alt.transcript)
+                    print(txt, end='\r\n')
+                    self.queue.put_nowait(txt)
 
-async def mic_stream(sample_rate):
+async def mic_stream(args):
     # This function wraps the raw input stream from the microphone forwarding
     # the blocks to an asyncio.Queue.
     loop = asyncio.get_event_loop()
@@ -51,11 +56,12 @@ async def mic_stream(sample_rate):
     # the audio formats described for the source language you'll be using:
     # https://docs.aws.amazon.com/transcribe/latest/dg/streaming.html
     stream = sounddevice.RawInputStream(
-        channels=1,
-        samplerate=sample_rate,
-        callback=callback,
-        blocksize=1024 * 2,
-        dtype="int16",
+        device = args.device,
+        channels = args.channels,
+        samplerate = args.samplerate,
+        callback = callback,
+        blocksize = 1024 * 2,
+        dtype = "int16",
     )
     # Initiate the audio stream and asynchronously yield the audio chunks
     # as they become available.
@@ -65,10 +71,10 @@ async def mic_stream(sample_rate):
             yield indata, status
 
 
-async def write_chunks(stream, sample_rate):
+async def write_chunks(stream, args):
     # This connects the raw audio chunks generator coming from the microphone
     # and passes them along to the transcription stream.
-    async for chunk, status in mic_stream(sample_rate):
+    async for chunk, status in mic_stream(args):
         await stream.input_stream.send_audio_event(audio_chunk=chunk)
     await stream.input_stream.end_stream()
 
@@ -77,16 +83,19 @@ async def basic_transcribe(queue, args):
     client = TranscribeStreamingClient(region=args.region)
 
     # Start transcription to generate our async stream
+    # https://github.com/awslabs/amazon-transcribe-streaming-sdk/blob/develop/amazon_transcribe/client.py
     stream = await client.start_stream_transcription(
-        language_code=args.source,
-        media_sample_rate_hz=args.samplerate,
+        language_code = args.source,
+        media_sample_rate_hz = args.samplerate,
+        #this params must set to None
+        number_of_channels = None, #args.channels,
         media_encoding="pcm",
     )
 
     # Instantiate our handler and start processing events
     handler = MyEventHandler(stream.output_stream)
     handler.queue = queue
-    await asyncio.gather(write_chunks(stream, args.samplerate), handler.handle_events())
+    await asyncio.gather(write_chunks(stream, args), handler.handle_events())
 
 def translate_text(client, text, args):
     ret = client.translate_text(Text=text, SourceLanguageCode=args.source, TargetLanguageCode=args.target)
@@ -99,7 +108,7 @@ async def basic_translate(queue, args):
         transtext = await queue.get()
         with concurrent.futures.ThreadPoolExecutor() as pool:
             result = await loop.run_in_executor(pool, translate_text, translate, transtext, args)
-            print(result.get('TranslatedText'))
+            print(result.get('TranslatedText')+'\r\n')
 
 async def main(args):
     queue = asyncio.Queue()
@@ -108,13 +117,25 @@ async def main(args):
         asyncio.create_task(basic_transcribe(queue, args))
     ])
 
+print('current use device list:')
+print(sounddevice.query_devices())
+print('')
+
 parser = argparse.ArgumentParser()
 parser.description="Realtime Translate from microphone"
-parser.add_argument("-s", "--source", help="Specify input language(e.g. en-US, zh-CN, ja-JP)", type=str, default="en-US")
-parser.add_argument("-t", "--target", help="Specify output language", type=str, default="zh-CN")
-parser.add_argument("-r", "--region", help="Specify endpoint region", type=str, default="ap-northeast-1")
-parser.add_argument("-sr", "--samplerate", help="Specify samplerate in HZ", type=int, default=16000)
+parser.add_argument("-s", "--source", help="Specify input language(e.g. en-US, zh-CN, ja-JP, default: en-US)", type=str, default="en-US")
+parser.add_argument("-t", "--target", help="Specify output language, default: zh-CN", type=str, default="zh-CN")
+parser.add_argument("-r", "--region", help="Specify endpoint region, default: ap-northeast-1", type=str, default="ap-northeast-1")
+parser.add_argument("-i", "--device", help="Specify input device, such as Soundflower can be run", type=int, default=sounddevice.default.device[0])
+parser.add_argument("-sr", "--samplerate", help="Specify samplerate in HZ, default: 16000", type=int, default=16000)
 args = parser.parse_args()
+#channels must set to 1
+args.channels = 1
+
+print('use device:', args.device, ', channels:', args.channels ,', dtype: int16, samplerate:', args.samplerate, ', source:', args.source, ', target:', args.target, ', region:', args.region, '\r\n')
+#check if params is ok
+#soundflower can not support int16
+sounddevice.check_input_settings(device= args.device, channels = args.channels, dtype = 'int16', samplerate = args.samplerate)
 
 loop = asyncio.get_event_loop()
 loop.run_until_complete(main(args))
