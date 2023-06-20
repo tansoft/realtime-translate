@@ -108,7 +108,7 @@ async def basic_translate(queue, args):
         transtext = await queue.get()
         with concurrent.futures.ThreadPoolExecutor() as pool:
             result = await loop.run_in_executor(pool, translate_text, translate, transtext, args)
-            print(result.get('TranslatedText')+'\r\n')
+            print('\033[31m' + result.get('TranslatedText')+'\33[0m\r\n')
 
 async def main(args):
     queue = asyncio.Queue()
